@@ -8,45 +8,23 @@ import { Rel, Collection } from '@mikro-orm/core';
   default: true,
 })
 export class Company {
-
-  @PrimaryKey()
-  id!: string;
-
-  @Property()
-  name!: string;
-
-  @Property({ unique: true })
-  code!: string;
-
-  @OneToMany(() => Location, (location) => location.company)
+  @PrimaryKey() id!: string;
+  @Property() name!: string;
+  @Property({ unique: true }) code!: string;
+  @OneToMany(() => Location, (l) => l.company)
   locations = new Collection<Location>(this);
-
 }
 
 @Entity()
 export class Location {
-
-  @PrimaryKey()
-  id!: string;
-
-  @Property()
-  name!: string;
-
-  @ManyToOne(() => Company)
-  company!: Rel<Company>;
-
+  @PrimaryKey() id!: string;
+  @Property() name!: string;
+  @ManyToOne(() => Company) company!: Rel<Company>;
 }
 
 @Entity()
 export class Product {
-
-  @PrimaryKey()
-  id!: string;
-
-  @Property()
-  title!: string;
-
-  @ManyToOne(() => Company)
-  company!: Rel<Company>;
-
+  @PrimaryKey() id!: string;
+  @Property() title!: string;
+  @ManyToOne(() => Company) company!: Rel<Company>;
 }

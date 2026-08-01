@@ -1,73 +1,70 @@
-# MikroORM v7 `applyJoinedFilters` Bug — `errorMissingRTE`
+# MikroORM v7 `applyJoinedFilters` + `autoJoinRefsForFilters: false` — `errorMissingRTE`
 
-Minimal reproduction of a MikroORM v7 bug where `QueryBuilder.applyJoinedFilters()` fails to strip relation-path filter conditions containing operators (`$in`, `$eq`) from join ON clauses, causing `missing FROM-clause entry for table "c3"` (`errorMissingRTE`).
+Minimal reproduction of a MikroORM v7 bug where `applyJoinedFilters()` places filter conditions in a join ON clause that references a table alias defined in a **later** join, causing `missing FROM-clause entry for table "l2"` (`errorMissingRTE`).
 
-## Bug Summary
+## Root Cause
 
-When an entity has a `@Filter` whose condition references a relation via an operator (e.g., `{ company: { $in: companyIds } }`), and a query auto-joins that same relation, MikroORM v7's `applyJoinedFilters` method attempts to push the filter condition into the join ON clause. However, the filter stripping logic fails to remove conditions with operators like `$in`, causing the surviving filter to trigger a duplicate auto-join (alias `c3`) that is not added to the FROM clause.
+When `autoJoinRefsForFilters: false` is set in the ORM config, and an entity has a `@Filter` whose condition references a relation (e.g., `{ $or: [{ id: [...] }, { locations: [...] }] }`), and a query auto-joins that entity, `applyJoinedFilters()` applies the filter in the join ON clause. However, the relation referenced in the filter condition (`locations`) creates a **secondary join** that is added to the FROM clause **after** the primary join. This creates a forward reference: the ON clause of the first join references an alias from the second join.
 
-### Root Cause
+### The Bug in Detail
 
-In `QueryBuilder.applyJoinedFilters()` ([QueryBuilder.js line ~420](https://github.com/mikro-orm/mikro-orm/blob/master/packages/sql/src/query/QueryBuilder.ts#L405)):
+1. Entity `Product` has M:1 to `Company`
+2. `Company` has a `@Filter` with `{ $or: [{ id: [...] }, { locations: [...] }] }` where `locations` is a O:M relation
+3. Query: `em.find(Product, { company: { code: 'ACME' } })` — auto-joins `Company`
+4. `applyJoinedFilters` applies Company's filter in the Company join ON clause
+5. The `{ locations: [...] }` part survives the stripping logic (arrays are not plain objects)
+6. `CriteriaNode.process()` creates a secondary join for `Location` (alias `l2`)
+7. **With `autoJoinRefsForFilters: false`**, the `l2` join is added **after** the `c1` (Company) join
+8. The `c1` join ON clause references `l2.id`, but `l2` hasn't been defined yet
+9. PostgreSQL: `missing FROM-clause entry for table "l2"`
 
-```js
-// remove nested filters, we only care about scalars here
-for (const key of Object.keys(cond)) {
-    if (Utils.isPlainObject(cond[key]) &&
-        Object.keys(cond[key]).every(k => !(Utils.isOperator(k) && !['$some', '$none', '$every', '$size'].includes(k)))) {
-        delete cond[key];
-    }
-}
+### Generated SQL (buggy)
+
+```sql
+select "p0".*
+from "product" as "p0"
+inner join "company" as "c1" on "p0"."company_id" = "c1"."id"
+  and ("c1"."id" in ('company-1') or "l2"."id" in ('loc-1'))  -- ❌ l2 not yet defined
+left join "location" as "l2" on "c1"."id" = "l2"."company_id"  -- l2 defined here, too late
+where "c1"."code" = 'ACME'
 ```
 
-For `{ company: { $in: companyIds } }`:
-- `cond[key]` = `{ $in: companyIds }` — is a plain object ✅
-- `Object.keys(cond[key])` = `['$in']`
-- `Utils.isOperator('$in')` = `true`
-- `!['$some', '$none', '$every', '$size'].includes('$in')` = `true`
-- `!(true && true)` = `false`
-- `.every()` returns `false`
-- The key is **NOT deleted** ❌
+### With `autoJoinRefsForFilters: true` (default — works correctly)
 
-The surviving `{ company: { $in: companyIds } }` causes `CriteriaNode.process()` to try auto-joining `company` again, creating a new alias (e.g., `c3`) that's not in the FROM clause.
+```sql
+select "p0".*, "c1"."id" as "c1__id"
+from "product" as "p0"
+inner join "company" as "c1" on "p0"."company_id" = "c1"."id"
+  and "c1"."id" in ('company-1')
+left join "location" as "l2" on "c1"."id" = "l2"."company_id"  -- ✅ l2 defined before use
+  and "l2"."id" in ('loc-1')
+where "c1"."code" = 'ACME'
+```
 
-### Conditions That Trigger the Bug
+With the default `autoJoinRefsForFilters: true`, the filter condition is placed in the Location join ON clause (not the Company join ON clause), and the Location join is added to FROM before it's referenced.
 
-1. Entity A has a `@Filter` with a condition referencing a relation via an operator: `{ company: { $in: [...] } }`
-2. A query on entity A (or entity B that joins A) auto-joins the same relation: `{ company: { code: 'X' } }`
-3. `applyJoinedFilters` runs for the auto-joined path and applies the filter in the join ON clause
-4. The stripping logic fails to remove the `$in` condition
-5. The surviving condition triggers a duplicate auto-join → `errorMissingRTE`
-
-### Workaround
-
-Use raw SQL fragments with the `[::alias::]` placeholder instead of relation-path filter conditions:
+## Key Setting
 
 ```ts
-import { raw } from '@mikro-orm/core';
-
-// Instead of: { company: { $in: companyIds } }
-// Use:
-{ [raw(`[::alias::].company_id IN (${placeholders})`, companyIds)]: [] }
+await MikroORM.init({
+  // ...
+  autoJoinRefsForFilters: false,  // <-- triggers the bug
+});
 ```
 
-Raw SQL fragments are scalar fragments that survive the stripping logic correctly and don't trigger auto-join.
+## Reproduction
 
-## Reproduction Status
+```bash
+pnpm install
+createdb mikro_orm_v7_bug_repro
+npx tsc --skipLibCheck --noEmitOnError false
+node dist/index.js
+```
 
-This repo contains a minimal setup that demonstrates the conditions under which the bug occurs. The bug is confirmed in the real workplace-manager codebase (58+ entities, complex relation graph) but is difficult to reproduce in a minimal standalone setup because it depends on:
-
-1. The filter being defined on the **target** entity of an auto-joined relation (not the root entity)
-2. The filter condition using an operator (`$in`) on a relation path
-3. The query auto-joining the same relation that the filter references
-
-In simple setups, MikroORM correctly translates `{ company: { $in: [...] } }` to a scalar FK condition (`company_id IN (...)`) without triggering `applyJoinedFilters`. The bug only manifests when the filter is applied to a joined entity in the ON clause context.
-
-## Files
-
-- `src/entities.ts` — Entity definitions with `@Filter`
-- `src/index.ts` — Reproduction script
-- `tsconfig.json` — TypeScript config with experimental decorators
+Expected output:
+```
+❌ Query failed: missing FROM-clause entry for table "l2"
+```
 
 ## Versions
 
@@ -76,13 +73,43 @@ In simple setups, MikroORM correctly translates `{ company: { $in: [...] } }` to
 - `@mikro-orm/decorators`: 7.1.7
 - TypeScript: 5.9.3
 - Node.js: 22.x
+- PostgreSQL: 14+
 
-## Running
+## Files
 
-```bash
-pnpm install
-# Requires PostgreSQL running on localhost:5432 with user postgres/postgres
-createdb mikro_orm_v7_bug_repro
-npx tsc --skipLibCheck --noEmitOnError false
-node dist/index.js
+- `src/entities.ts` — Entity definitions: `Product` (M:1 → `Company`), `Company` (O:M → `Location`, has `@Filter`)
+- `src/index.ts` — Reproduction script with `autoJoinRefsForFilters: false`
+- `tsconfig.json` — TypeScript config with experimental decorators
+
+## Analysis
+
+The bug is in `QueryBuilder.applyJoinedFilters()` ([QueryBuilder.js line ~405](https://github.com/mikro-orm/mikro-orm/blob/master/packages/sql/src/query/QueryBuilder.ts#L405)). The method:
+
+1. Iterates over `autoJoinedPaths`
+2. For each path, applies the target entity's filters
+3. Processes the filter through `CriteriaNode.process()`, which may create secondary joins
+4. Strips nested relation-path filters from the join ON condition (but fails for arrays and `$or`)
+5. Sets the join condition
+
+The stripping logic (line ~420) is supposed to remove relation-path filters, keeping only scalars:
+
+```js
+for (const key of Object.keys(cond)) {
+    if (Utils.isPlainObject(cond[key]) &&
+        Object.keys(cond[key]).every(k => !(Utils.isOperator(k) && !['$some','$none','$every','$size'].includes(k)))) {
+        delete cond[key];
+    }
+}
 ```
+
+This fails to strip:
+- `{ locations: ['loc-1'] }` — arrays are not plain objects (`isPlainObject([])` = false)
+- `{ $or: [...] }` — arrays are not plain objects
+
+The surviving filter condition causes `CriteriaNode.process()` to create a secondary join. With `autoJoinRefsForFilters: false`, this secondary join is placed **after** the primary join, creating a forward reference in the ON clause.
+
+### Possible Fixes
+
+1. **Fix the stripping logic** to also handle arrays and `$or`/`$and` operators
+2. **Fix the join ordering** so secondary joins from filter conditions are always placed before the primary join that references them
+3. **Document the interaction** between `autoJoinRefsForFilters: false` and `@Filter` conditions that reference relations
