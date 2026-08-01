@@ -3,7 +3,8 @@
   "version": "1.0.0",
   "description": "Minimal reproduction of MikroORM v7 applyJoinedFilters bug causing errorMissingRTE",
   "scripts": {
-    "test": "ts-node src/index.ts"
+    "build": "tsc --skipLibCheck --noEmitOnError false || true",
+    "test": "tsc --skipLibCheck --noEmitOnError false || true && node dist/index.js"
   },
   "dependencies": {
     "@mikro-orm/core": "7.1.7",
@@ -13,8 +14,6 @@
   },
   "devDependencies": {
     "@types/node": "^26.1.2",
-    "ts-node": "^10.9.2",
-    "tsx": "^4.23.1",
     "typescript": "^5.7.0"
   }
 }

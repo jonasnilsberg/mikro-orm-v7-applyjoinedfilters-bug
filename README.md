@@ -57,9 +57,10 @@ await MikroORM.init({
 ```bash
 pnpm install
 createdb mikro_orm_v7_bug_repro
-npx tsc --skipLibCheck --noEmitOnError false
-node dist/index.js
+pnpm test
 ```
+
+This compiles with `--skipLibCheck` (to avoid a known TS2419 driver type mismatch in MikroORM v7's typings) and runs the compiled JS, which correctly emits decorator metadata.
 
 Expected output:
 ```
